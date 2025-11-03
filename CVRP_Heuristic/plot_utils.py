@@ -36,6 +36,7 @@ def save_solution(
     cost: float,
     base_dir: str = "solutions",
     filename: Optional[str] = None,
+    runtime_sec: Optional[float] = None,
 ) -> str:
     """
     Save solution in the format:
@@ -69,6 +70,8 @@ def save_solution(
             f.write(f"Cost {int(round(cost))}\n")
         else:
             f.write(f"Cost {cost:.6f}\n")
+        if runtime_sec is not None:
+            f.write(f"Runtime {runtime_sec:.3f} sec\n")
 
     return sol_path
 
