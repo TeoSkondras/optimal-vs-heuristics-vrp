@@ -210,3 +210,8 @@ __marimo__/
 *.sol
 *.png
 *.vrp
+
+#everything in the folders Uchoa_et_al_2014
+Uchoa_et_al_2014/*
+#everything in the folder Vrp-Set-HG
+Vrp-Set-HG/*
