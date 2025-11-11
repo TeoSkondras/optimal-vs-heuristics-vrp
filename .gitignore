@@ -210,6 +210,7 @@ __marimo__/
 *.sol
 *.png
 *.vrp
+*.txt
 
 #everything in the folders Uchoa_et_al_2014
 Uchoa_et_al_2014/*
