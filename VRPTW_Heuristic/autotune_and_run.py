@@ -27,6 +27,41 @@ EPS = 1e-6
 
 
 # ============================================================
+# Instance profiling helpers (for parameter tuning)
+# ============================================================
+
+def _profile_instance(inst: VRPTWInstance) -> Dict[str, float]:
+    """Extract lightweight structural metrics used for rule-based tuning."""
+    name = inst.name.lower() if inst.name else ""
+    prefix_full = name.split("_")[0] if name else ""
+    if prefix_full.startswith("rc"):
+        instance_type = "rc"
+    elif prefix_full.startswith("c"):
+        instance_type = "c"
+    elif prefix_full.startswith("r"):
+        instance_type = "r"
+    else:
+        instance_type = prefix_full[:1] if prefix_full else "?"
+
+    horizon = float(inst.due_time[0]) if inst.due_time.size else 1.0
+    customer_windows = inst.due_time[1:] - inst.ready_time[1:]
+    customer_windows = customer_windows[customer_windows >= 0]
+    avg_window = float(np.mean(customer_windows)) if customer_windows.size else 0.0
+    tight_ratio = avg_window / max(1.0, horizon)
+
+    total_demand = float(np.sum(inst.demand[1:]))
+    capacity_total = float(inst.n_vehicles * inst.capacity) if inst.n_vehicles > 0 else 1.0
+    demand_util = total_demand / max(1.0, capacity_total)
+
+    return {
+        "instance_type": instance_type,
+        "tight_ratio": tight_ratio,
+        "avg_window": avg_window,
+        "demand_util": demand_util,
+    }
+
+
+# ============================================================
 # Time budget rules (base, before adaptive extensions)
 # ============================================================
 
@@ -53,8 +88,30 @@ def get_base_time_budgets(n_customers: int) -> Dict[str, float]:
 
 def tune_tabu_params(inst: VRPTWInstance, base_time: float, verbose: bool) -> Dict:
     n = inst.n_customers
-    tenure = max(5, min(40, int(np.sqrt(n))))     # ~sqrt(n) classic
-    max_iter = int(5_000 + 10 * n)                # high; time_limit is binding
+    profile = _profile_instance(inst)
+
+    tenure_base = np.sqrt(max(1, n))
+    if profile["instance_type"] == "c":
+        tenure = 0.9 * tenure_base
+    elif profile["instance_type"] == "r":
+        tenure = 1.05 * tenure_base
+    elif profile["instance_type"] == "rc":
+        tenure = 1.15 * tenure_base
+    else:
+        tenure = tenure_base
+
+    if profile["tight_ratio"] < 0.18:
+        tenure += 4
+    elif profile["tight_ratio"] > 0.35:
+        tenure -= 2
+
+    if profile["demand_util"] > 0.9:
+        tenure += 2
+
+    tenure = int(max(5, min(60, round(tenure))))
+
+    iter_scale = 0.9 if base_time < 45 else 1.1 if base_time > 90 else 1.0
+    max_iter = int((5_000 + 10 * n) * iter_scale)
     return dict(
         max_iterations=max_iter,
         tenure=tenure,
@@ -69,16 +126,32 @@ def tune_tabu_params(inst: VRPTWInstance, base_time: float, verbose: bool) -> Di
 
 def tune_ils_params(inst: VRPTWInstance, base_time: float, verbose: bool) -> Dict:
     n = inst.n_customers
+    profile = _profile_instance(inst)
+
     max_it = 40 if n <= 300 else 60 if n <= 700 else 80
+    time_scale = 1.2 if base_time > 70 else 0.9 if base_time < 40 else 1.0
+    max_it = int(max_it * time_scale)
+
     base_strength = 2 if n <= 300 else 3 if n <= 700 else 4
+    if profile["instance_type"] == "r":
+        base_strength += 1
+    if profile["instance_type"] == "rc":
+        base_strength += 1
+    if profile["tight_ratio"] < 0.18:
+        base_strength += 1
+    elif profile["tight_ratio"] > 0.35 and base_strength > 2:
+        base_strength -= 1
+
+    ls_iter = int(2_000 + 4 * n)
+
     return dict(
         max_iterations=max_it,
         perturb_strength=base_strength,
         max_perturb_strength=base_strength + 6,
         adapt_perturb_every=5,
-        exploratory_accept_prob=0.15,
+        exploratory_accept_prob=0.18 if profile["tight_ratio"] < 0.18 else 0.12,
         accept_equal_cost=True,
-        ls_max_iterations=5_000,
+        ls_max_iterations=ls_iter,
         ls_use_inter_route=True,
         verbose=verbose,
     )
@@ -86,17 +159,38 @@ def tune_ils_params(inst: VRPTWInstance, base_time: float, verbose: bool) -> Dic
 
 def tune_alns_params(inst: VRPTWInstance, base_time: float, verbose: bool) -> Dict:
     n = inst.n_customers
-    max_it = 800 if n <= 300 else 1000 if n <= 700 else 1200
+    profile = _profile_instance(inst)
+
+    time_scale = 1.0
+    if base_time > 120:
+        time_scale = 1.25
+    elif base_time < 80:
+        time_scale = 0.85
+
+    max_it = int((800 if n <= 300 else 1000 if n <= 700 else 1200) * time_scale)
+
+    if profile["instance_type"] == "c" and profile["tight_ratio"] > 0.35:
+        remove_min, remove_max = 0.04, 0.20
+    elif profile["tight_ratio"] < 0.18:
+        remove_min, remove_max = 0.08, 0.35
+    else:
+        remove_min, remove_max = 0.06, 0.28 if profile["instance_type"] in {"r", "rc"} else 0.25
+
+    segment_size = 40 if n <= 300 else 50 if n <= 700 else 60
+    reaction = 0.18 if profile["tight_ratio"] < 0.18 else 0.22
+    sigma1 = 7.0 if profile["instance_type"] in {"r", "rc"} else 6.0
+    sigma2 = 3.5 if profile["tight_ratio"] < 0.18 else 3.0
+
     return dict(
         max_iterations=max_it,
-        remove_fraction_min=0.05,
-        remove_fraction_max=0.25,
-        segment_size=50,
-        reaction=0.2,
-        sigma1=6.0,
-        sigma2=3.0,
+        remove_fraction_min=remove_min,
+        remove_fraction_max=remove_max,
+        segment_size=segment_size,
+        reaction=reaction,
+        sigma1=sigma1,
+        sigma2=sigma2,
         sigma3=1.0,
-        ls_max_iterations=3_000,
+        ls_max_iterations=int(2_000 + 3 * n),
         ls_use_inter_route=True,
         apply_ls_every=3,
         initial_temperature=None,
@@ -107,17 +201,30 @@ def tune_alns_params(inst: VRPTWInstance, base_time: float, verbose: bool) -> Di
 
 def tune_lns_params(inst: VRPTWInstance, base_time: float, verbose: bool) -> Dict:
     n = inst.n_customers
-    max_it = 400 if n <= 300 else 600 if n <= 700 else 800
+    profile = _profile_instance(inst)
+
+    time_scale = 1.2 if base_time > 100 else 0.9 if base_time < 60 else 1.0
+    max_it = int((400 if n <= 300 else 600 if n <= 700 else 800) * time_scale)
+
+    if profile["instance_type"] == "c" and profile["tight_ratio"] > 0.35:
+        remove_min, remove_max = 0.04, 0.18
+    elif profile["tight_ratio"] < 0.18:
+        remove_min, remove_max = 0.08, 0.30
+    else:
+        remove_min, remove_max = 0.06, 0.24 if profile["instance_type"] in {"r", "rc"} else 0.22
+
+    exploratory = 0.14 if profile["tight_ratio"] < 0.2 else 0.1
+
     return dict(
         max_iterations=max_it,
-        remove_fraction_min=0.05,
-        remove_fraction_max=0.20,
+        remove_fraction_min=remove_min,
+        remove_fraction_max=remove_max,
         use_shaw=True,
         use_worst=True,
         apply_ls_every=3,
-        ls_max_iterations=3_000,
+        ls_max_iterations=int(2_000 + 3 * n),
         ls_use_inter_route=True,
-        exploratory_accept_prob=0.10,
+        exploratory_accept_prob=exploratory,
         accept_equal_cost=True,
         verbose=verbose,
     )
