@@ -13,6 +13,7 @@ from utils import (
     total_cost,
     route_cost,
     route_load,
+    is_feasible,
 )
 
 # Optional: short intensification via your local search (import only if present)
@@ -309,13 +310,20 @@ def alns(
     # Distances
     D = build_distance_matrix(coords, edge_weight_type, round_euclidean=round_euclidean)
 
+    # Number of customers (excluding depot 0)
+    n = coords.shape[0] - 1
+
     # Init solution
     curr_routes = _copy_routes(routes_init)
     curr_cost = _cost(D, curr_routes)
     best_routes = _copy_routes(curr_routes)
     best_cost = curr_cost
 
-    n = coords.shape[0] - 1  # customers
+    # Sanity check: initial solution must be feasible and visit every customer exactly once
+    if not is_feasible(curr_routes, demand, Q, must_cover_all=True, n_customers=n):
+        raise ValueError(
+            "Initial routes_init given to ALNS are infeasible or do not visit all customers exactly once."
+        )
     min_remove = max(1, int(remove_fraction[0] * n))
     max_remove = max(min_remove, int(remove_fraction[1] * n))
 
@@ -412,6 +420,12 @@ def alns(
                 # if local_search import exists but something goes wrong, just ignore intensification
                 pass
 
+        # Feasibility check for candidate (capacity + full coverage)
+        if not is_feasible(cand_routes, demand, Q, must_cover_all=True, n_customers=n):
+            log(f"[ALNS] Infeasible candidate discarded at it={it}")
+            # Skip acceptance/weight updates for infeasible candidate
+            continue
+
         cand_cost = _cost(D, cand_routes)
         delta = cand_cost - curr_cost
 
@@ -464,5 +478,9 @@ def alns(
         if verbose and ((it % log_every) == 0 or (cand_cost + eps < best_cost + eps)):
             logger.info(f"[ALNS] it={it} T={T:.2f} Δ={delta:+.2f} curr={curr_cost:.2f} best={best_cost:.2f} "
                         f"D={d_key} R={r_key} q={q} routes={len(curr_routes)}")
+
+    # Final sanity check on best solution
+    if not is_feasible(best_routes, demand, Q, must_cover_all=True, n_customers=n):
+        raise RuntimeError("ALNS completed but best_routes is infeasible (coverage or capacity issue).")
 
     return ALNSSolution(routes=best_routes, cost=best_cost)
