@@ -13,6 +13,8 @@ import shutil
 import numpy as np
 import re
 import io
+import csv
+import json
 
 from utils import (
     build_distance_matrix,
@@ -702,5 +704,32 @@ def autotune_and_run_all(
             res = report[name]
             logger.info(f"  - {name.upper():5s} | cost={res['cost']:.2f} | routes={len(res['routes'])} | best@{res['time_to_best']:.2f}s")
         logger.info(f"  => BEST: {best_name.upper()} | cost={best_cost:.2f}")
+
+    # Also save a CSV summary into the instance solutions folder.
+    try:
+        sol_dir = os.path.join("solutions", inst_name)
+        _ensure_dir(sol_dir)
+        csv_path = os.path.join(sol_dir, f"{inst_name}_summary.csv")
+        with open(csv_path, 'w', newline='', encoding='utf-8') as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["algo", "cost", "route_count", "time_to_best", "cfg", "is_best"])
+            for name in ["cw", "ls", "ils", "tabu", "alns", "lns"]:
+                res = report[name]
+                cfg = res.get('cfg', {})
+                try:
+                    cfg_s = json.dumps(cfg, ensure_ascii=False)
+                except Exception:
+                    cfg_s = str(cfg)
+                writer.writerow([
+                    name,
+                    float(res.get('cost', float('nan'))),
+                    len(res.get('routes', [])),
+                    float(res.get('time_to_best', float('nan'))),
+                    cfg_s,
+                    (name == best_name),
+                ])
+    except Exception:
+        # Do not raise on CSV write errors; summary logging already done.
+        pass
 
     return report
