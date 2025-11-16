@@ -188,13 +188,21 @@ class AdvancedBestCatcher(logging.Handler):
                 self.best_time = now - self.start_time
 
 
-def attach_best_catcher(logger: logging.Logger):
-    start = time.perf_counter()
-    catcher = AdvancedBestCatcher(start)
+def attach_best_catcher(logger: logging.Logger, start_time: Optional[float] = None):
+    """Attach an AdvancedBestCatcher to ``logger``.
+
+    If ``start_time`` is provided, it is used as the reference (in perf_counter
+    units) for measuring time-to-best; otherwise we take the current
+    ``time.perf_counter()``.  This lets callers synchronize the catcher clock
+    with their own wall-time measurement.
+    """
+    if start_time is None:
+        start_time = time.perf_counter()
+    catcher = AdvancedBestCatcher(start_time)
     logger.setLevel(logging.INFO)
     logger.propagate = True
     logger.addHandler(catcher)
-    return catcher, start
+    return catcher, start_time
 
 class RealtimeStdoutBestCatcher(io.TextIOBase):
     RE_NEW_BEST = re.compile(r"\bnew\s+best\b", re.IGNORECASE)
@@ -324,12 +332,11 @@ def tune_and_run_local_search(
     else:
         ls_slice = min(time_budget_sec, 1.0 if feats.n >= 300 else 0.6)
 
-    # Prepare a child logger
+    # Prepare a child logger and align catcher start with our wall-clock timer
+    start_call = time.perf_counter()
     lgr = logging.getLogger("LocalSearch")
     lgr.setLevel(logging.INFO)
-    catcher, start = attach_best_catcher(lgr)
-
-    start_call = time.perf_counter()
+    catcher, _ = attach_best_catcher(lgr, start_time=start_call)
     ls = local_search(
         coords=inst.coords, demand=inst.demand, Q=inst.capacity,
         routes=[r[:] for r in routes_seed],
@@ -386,14 +393,15 @@ def tune_and_run_ils(
         verbose=bool(verbose),
     )
 
-    # Attach catcher to ILS logger (run_ils uses its own logging if passed)
+    # Attach catcher to ILS logger (run_ils uses its own logging if passed).
+    # Use a single reference start_call for both the logger-based and stdout-based
+    # best-time catchers so that time_to_best is consistent with total_elapsed.
+    start_call = time.perf_counter()
     lgr = logging.getLogger("ILS")
     lgr.setLevel(logging.INFO)
-    catcher, start = attach_best_catcher(lgr)  # logger-based catcher (kept)
+    catcher, _ = attach_best_catcher(lgr, start_time=start_call)
 
-    stdout_catcher = RealtimeStdoutBestCatcher(start, fallback_stream=sys.stdout)
-
-    start_call = time.perf_counter()
+    stdout_catcher = RealtimeStdoutBestCatcher(start_call, fallback_stream=sys.stdout)
     with contextlib.redirect_stdout(stdout_catcher):
         out = run_ils(
             coords=coords, demand=demand, Q=Q,
@@ -439,11 +447,10 @@ def tune_and_run_tabu(
         max_no_improve = 800 if feats.n >= 800 else (600 if feats.n >= 300 else 400)
     k_nearest = feats.nn_k_default
 
+    start_call = time.perf_counter()
     lgr = logging.getLogger("TabuSearch")
     lgr.setLevel(logging.INFO)
-    catcher, start = attach_best_catcher(lgr)
-
-    start_call = time.perf_counter()
+    catcher, _ = attach_best_catcher(lgr, start_time=start_call)
     out = tabu_search(
         coords=coords, demand=demand, Q=Q,
         routes_init=[r[:] for r in routes_init],
@@ -517,11 +524,10 @@ def tune_and_run_alns(
     reaction = 0.35 if feats.n >= 300 else 0.3
     segment = 30 if feats.n >= 300 else 40
 
+    start_call = time.perf_counter()
     lgr = logging.getLogger("ALNS")
     lgr.setLevel(logging.INFO)
-    catcher, start = attach_best_catcher(lgr)
-
-    start_call = time.perf_counter()
+    catcher, _ = attach_best_catcher(lgr, start_time=start_call)
     out = alns_run(
         coords=coords, demand=demand, Q=Q,
         routes_init=[r[:] for r in routes_init],
@@ -570,11 +576,10 @@ def tune_and_run_lns(
     ls_slice = 0.8 if feats.n >= 300 else 0.5
     if time_budget_sec <= 40: ls_slice = max(0.3, ls_slice * 0.75)
 
+    start_call = time.perf_counter()
     lgr = logging.getLogger("LNS")
     lgr.setLevel(logging.INFO)
-    catcher, start = attach_best_catcher(lgr)
-
-    start_call = time.perf_counter()
+    catcher, _ = attach_best_catcher(lgr, start_time=start_call)
     out = lns_run(
         coords=coords, demand=demand, Q=Q,
         routes_init=[r[:] for r in routes_init],
