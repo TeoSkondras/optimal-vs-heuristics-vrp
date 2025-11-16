@@ -80,7 +80,12 @@ def extract_features(coords: np.ndarray,
     routes_guess = max(min_routes_by_dem, route_count)
     tightness = total_dem / max(1, Q * routes_guess)
 
-    nn_k = int(np.clip(round(0.05 * n), 8, 40))
+    # For very small instances, use a smaller k-nearest default (but keep a sensible lower bound).
+    # Original default (0.05*n clipped to [8,40]) is too large for n<=70, so reduce bounds there.
+    if n <= 70:
+        nn_k = int(np.clip(round(0.08 * n), 4, 20))
+    else:
+        nn_k = int(np.clip(round(0.05 * n), 8, 40))
 
     D = build_distance_matrix(coords, edge_weight_type, round_euclidean=round_euclidean)
     feats = InstanceFeatures(
@@ -310,7 +315,12 @@ def tune_and_run_local_search(
     """
     feats, D = extract_features(inst.coords, inst.demand, inst.capacity, routes_seed, inst.edge_weight_type, False)
     k_nearest = feats.nn_k_default
-    ls_slice = min(time_budget_sec, 1.0 if feats.n >= 300 else 0.6)
+    # For very small instances, prefer a smaller local-search slice to avoid overspending
+    # on brief problems; otherwise keep previous heuristics.
+    if feats.n <= 70:
+        ls_slice = min(time_budget_sec, 0.35)
+    else:
+        ls_slice = min(time_budget_sec, 1.0 if feats.n >= 300 else 0.6)
 
     # Prepare a child logger
     lgr = logging.getLogger("LocalSearch")
@@ -346,7 +356,10 @@ def tune_and_run_ils(
     rng = random.Random(seed)
     feats, D = extract_features(coords, demand, Q, routes_initial, edge_weight_type, round_euclidean)
 
-    if feats.n <= 200:
+    # Small-instance adjustment: use a tighter LS slice for n<=70 to keep iterations quick
+    if feats.n <= 70:
+        ls_slice = min(1.0, max(0.4, 0.01 * feats.n))
+    elif feats.n <= 200:
         ls_slice = min(2.5, max(1.0, 0.015 * feats.n))
     elif feats.n <= 1000:
         ls_slice = min(2.0, max(0.8, 0.01 * feats.n))
@@ -417,7 +430,11 @@ def tune_and_run_tabu(
 
     intra_cap = int(np.clip(1.5 * feats.med_route_len, 32, 128))
     inter_cap = int(np.clip(2.5 * feats.med_route_len, 64, 256))
-    max_no_improve = 800 if feats.n >= 800 else (600 if feats.n >= 300 else 400)
+    # For small instances we don't need extremely long no-improve windows.
+    if feats.n <= 70:
+        max_no_improve = 200
+    else:
+        max_no_improve = 800 if feats.n >= 800 else (600 if feats.n >= 300 else 400)
     k_nearest = feats.nn_k_default
 
     lgr = logging.getLogger("TabuSearch")
@@ -462,7 +479,11 @@ def tune_and_run_tabu(
 
 
 def _choose_remove_fraction(n: int, density: float, tightness: float) -> Tuple[float, float]:
-    if n <= 200:
+    # Slightly smaller ruin sizes for very small instances to avoid over-destroying
+    # (less disruptive moves when few customers exist).
+    if n <= 70:
+        a, b = 0.06, 0.14
+    elif n <= 200:
         a, b = 0.08, 0.18
     elif n <= 700:
         a, b = 0.10, 0.22
