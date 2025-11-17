@@ -512,6 +512,7 @@ def solve_instance_with_all(
     verbose: bool = False,
     start_with_ls_solution: bool = True,
     improvement_time_window: float = 15.0,
+    runtime_dict: Optional[Dict[str, float]] = None,
 ) -> None:
     inst = parse_homberger_1999_vrptw_file(inst_path)
     D = build_distance_matrix(inst)
@@ -521,6 +522,19 @@ def solve_instance_with_all(
         print(f"\n=== Instance {inst.name} | n={n}, vehicles={inst.n_vehicles}, cap={inst.capacity} ===")
 
     base_times = get_base_time_budgets(n)
+
+    # If caller provided explicit runtimes, override base_times for those
+    # algorithms and disable adaptive extensions so each algorithm runs for
+    # exactly the requested number of seconds.
+    explicit_runtimes = bool(runtime_dict)
+    if explicit_runtimes and runtime_dict is not None:
+        # normalize keys to lower-case to be forgiving
+        rd = {k.lower(): float(v) for k, v in runtime_dict.items()}
+        for algo_key in ("ls", "ils", "tabu", "alns", "lns"):
+            if algo_key in rd:
+                # require non-negative; if negative, ignore and keep base
+                if rd[algo_key] >= 0:
+                    base_times[algo_key] = float(rd[algo_key])
 
     # ---------- 1) Clarke-Wright ----------
     if verbose:
@@ -551,7 +565,8 @@ def solve_instance_with_all(
         cw_routes,
         ls_runner,
         verbose=verbose,
-        improvement_time_window=improvement_time_window,
+        # if explicit runtimes were provided, disable adaptive extensions
+        improvement_time_window=0.0 if explicit_runtimes else improvement_time_window,
     )
     ls_sol, ls_png = save_solution_with_suffix(inst, ls_routes, D, "ls", base_dir)
     results_rows.append([inst.name, "ls", os.path.basename(ls_sol), ls_cost, ls_ttb])
@@ -580,7 +595,7 @@ def solve_instance_with_all(
         start_routes,
         tabu_runner,
         verbose=verbose,
-        improvement_time_window=improvement_time_window,
+        improvement_time_window=0.0 if explicit_runtimes else improvement_time_window,
     )
     tabu_sol, tabu_png = save_solution_with_suffix(inst, tabu_routes, D, "tabu", base_dir)
     results_rows.append([inst.name, "tabu", os.path.basename(tabu_sol), tabu_cost, tabu_ttb])
@@ -598,7 +613,7 @@ def solve_instance_with_all(
         start_routes,
         ils_runner,
         verbose=verbose,
-        improvement_time_window=improvement_time_window,
+        improvement_time_window=0.0 if explicit_runtimes else improvement_time_window,
     )
     ils_sol, ils_png = save_solution_with_suffix(inst, ils_routes, D, "ils", base_dir)
     results_rows.append([inst.name, "ils", os.path.basename(ils_sol), ils_cost, ils_ttb])
@@ -616,7 +631,7 @@ def solve_instance_with_all(
         start_routes,
         alns_runner,
         verbose=verbose,
-        improvement_time_window=improvement_time_window,
+        improvement_time_window=0.0 if explicit_runtimes else improvement_time_window,
     )
     alns_sol, alns_png = save_solution_with_suffix(inst, alns_routes, D, "alns", base_dir)
     results_rows.append([inst.name, "alns", os.path.basename(alns_sol), alns_cost, alns_ttb])
@@ -634,7 +649,7 @@ def solve_instance_with_all(
         start_routes,
         lns_runner,
         verbose=verbose,
-        improvement_time_window=improvement_time_window,
+        improvement_time_window=0.0 if explicit_runtimes else improvement_time_window,
     )
     lns_sol, lns_png = save_solution_with_suffix(inst, lns_routes, D, "lns", base_dir)
     results_rows.append([inst.name, "lns", os.path.basename(lns_sol), lns_cost, lns_ttb])
@@ -669,6 +684,7 @@ def run_batch(
     verbose: bool = False,
     start_with_ls_solution: bool = True,
     improvement_time_window: float = 15.0,
+    runtime_dict: Optional[Dict[str, float]] = None,
 ) -> None:
     """Run `solve_instance_with_all` for each .txt instance in `directory`.
 
@@ -685,6 +701,39 @@ def run_batch(
     all_rows: List[List[object]] = []
     header = ["instance", "algo", "solution", "cost", "time_to_best"]
 
+    # Validate and normalize runtime_dict early so we can report problems
+    cleaned_runtime_dict: Optional[Dict[str, float]] = None
+    if runtime_dict:
+        allowed_keys = {"ls", "ils", "tabu", "alns", "lns"}
+        cleaned_runtime_dict = {}
+        for k, v in runtime_dict.items():
+            try:
+                key = str(k).lower()
+            except Exception:
+                if verbose:
+                    print(f"[run_batch][WARN] runtime_dict: ignoring invalid key {k!r}")
+                continue
+            try:
+                val = float(v)
+            except Exception:
+                if verbose:
+                    print(f"[run_batch][WARN] runtime_dict: ignoring non-numeric value for key {k!r}")
+                continue
+            if val < 0:
+                if verbose:
+                    print(f"[run_batch][WARN] runtime_dict: ignoring negative runtime for key {k!r}")
+                continue
+            if key not in allowed_keys:
+                if verbose:
+                    print(
+                        f"[run_batch][WARN] runtime_dict: unknown key {k!r}; "
+                        f"allowed keys: {sorted(list(allowed_keys))}"
+                    )
+                continue
+            cleaned_runtime_dict[key] = val
+        if verbose:
+            print(f"[run_batch] Using explicit runtimes: {cleaned_runtime_dict}")
+
     if verbose:
         print(f"Scanning directory: {directory}")
         print(f"Found {len(txt_files)} .txt instances")
@@ -698,6 +747,7 @@ def run_batch(
             verbose=verbose,
             start_with_ls_solution=start_with_ls_solution,
             improvement_time_window=improvement_time_window,
+            runtime_dict=cleaned_runtime_dict,
         )
 
     _ensure_dir(os.path.dirname(results_csv) or ".")
@@ -710,3 +760,40 @@ def run_batch(
 
     if verbose:
         print("Done.")
+
+
+def preview_runtimes(directory: str, runtime_dict: Optional[Dict[str, float]] = None, limit: int = 10, verbose: bool = True) -> None:
+    """Print a preview of the per-algorithm runtimes that would be used for
+    the first `limit` instances in `directory` without running the solvers.
+
+    This is a lightweight helper to verify how `runtime_dict` will override
+    the default time budgets.
+    """
+    txt_files = [f for f in os.listdir(directory) if f.lower().endswith(".txt")]
+    txt_files.sort()
+    if not txt_files:
+        if verbose:
+            print(f"[preview_runtimes] No .txt instances found in: {directory}")
+        return
+
+    shown = txt_files[:max(0, int(limit))]
+    for fname in shown:
+        path = os.path.join(directory, fname)
+        try:
+            inst = parse_homberger_1999_vrptw_file(path)
+        except Exception as exc:
+            if verbose:
+                print(f"[preview_runtimes] Could not parse {fname}: {exc}")
+            continue
+        base = get_base_time_budgets(inst.n_customers)
+        applied = base.copy()
+        if runtime_dict:
+            for k, v in runtime_dict.items():
+                try:
+                    key = str(k).lower()
+                    val = float(v)
+                except Exception:
+                    continue
+                if key in applied and val >= 0:
+                    applied[key] = val
+        print(f"{fname}: n={inst.n_customers}, applied_times={applied}")

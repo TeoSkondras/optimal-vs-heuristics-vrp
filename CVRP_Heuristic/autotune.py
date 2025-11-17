@@ -13,6 +13,8 @@ import shutil
 import numpy as np
 import re
 import io
+import csv
+import json
 
 from utils import (
     build_distance_matrix,
@@ -80,7 +82,12 @@ def extract_features(coords: np.ndarray,
     routes_guess = max(min_routes_by_dem, route_count)
     tightness = total_dem / max(1, Q * routes_guess)
 
-    nn_k = int(np.clip(round(0.05 * n), 8, 40))
+    # For very small instances, use a smaller k-nearest default (but keep a sensible lower bound).
+    # Original default (0.05*n clipped to [8,40]) is too large for n<=70, so reduce bounds there.
+    if n <= 70:
+        nn_k = int(np.clip(round(0.08 * n), 4, 20))
+    else:
+        nn_k = int(np.clip(round(0.05 * n), 8, 40))
 
     D = build_distance_matrix(coords, edge_weight_type, round_euclidean=round_euclidean)
     feats = InstanceFeatures(
@@ -181,13 +188,21 @@ class AdvancedBestCatcher(logging.Handler):
                 self.best_time = now - self.start_time
 
 
-def attach_best_catcher(logger: logging.Logger):
-    start = time.perf_counter()
-    catcher = AdvancedBestCatcher(start)
+def attach_best_catcher(logger: logging.Logger, start_time: Optional[float] = None):
+    """Attach an AdvancedBestCatcher to ``logger``.
+
+    If ``start_time`` is provided, it is used as the reference (in perf_counter
+    units) for measuring time-to-best; otherwise we take the current
+    ``time.perf_counter()``.  This lets callers synchronize the catcher clock
+    with their own wall-time measurement.
+    """
+    if start_time is None:
+        start_time = time.perf_counter()
+    catcher = AdvancedBestCatcher(start_time)
     logger.setLevel(logging.INFO)
     logger.propagate = True
     logger.addHandler(catcher)
-    return catcher, start
+    return catcher, start_time
 
 class RealtimeStdoutBestCatcher(io.TextIOBase):
     RE_NEW_BEST = re.compile(r"\bnew\s+best\b", re.IGNORECASE)
@@ -310,14 +325,18 @@ def tune_and_run_local_search(
     """
     feats, D = extract_features(inst.coords, inst.demand, inst.capacity, routes_seed, inst.edge_weight_type, False)
     k_nearest = feats.nn_k_default
-    ls_slice = min(time_budget_sec, 1.0 if feats.n >= 300 else 0.6)
+    # For very small instances, prefer a smaller local-search slice to avoid overspending
+    # on brief problems; otherwise keep previous heuristics.
+    if feats.n <= 70:
+        ls_slice = min(time_budget_sec, 0.35)
+    else:
+        ls_slice = min(time_budget_sec, 1.0 if feats.n >= 300 else 0.6)
 
-    # Prepare a child logger
+    # Prepare a child logger and align catcher start with our wall-clock timer
+    start_call = time.perf_counter()
     lgr = logging.getLogger("LocalSearch")
     lgr.setLevel(logging.INFO)
-    catcher, start = attach_best_catcher(lgr)
-
-    start_call = time.perf_counter()
+    catcher, _ = attach_best_catcher(lgr, start_time=start_call)
     ls = local_search(
         coords=inst.coords, demand=inst.demand, Q=inst.capacity,
         routes=[r[:] for r in routes_seed],
@@ -346,7 +365,10 @@ def tune_and_run_ils(
     rng = random.Random(seed)
     feats, D = extract_features(coords, demand, Q, routes_initial, edge_weight_type, round_euclidean)
 
-    if feats.n <= 200:
+    # Small-instance adjustment: use a tighter LS slice for n<=70 to keep iterations quick
+    if feats.n <= 70:
+        ls_slice = min(1.0, max(0.4, 0.01 * feats.n))
+    elif feats.n <= 200:
         ls_slice = min(2.5, max(1.0, 0.015 * feats.n))
     elif feats.n <= 1000:
         ls_slice = min(2.0, max(0.8, 0.01 * feats.n))
@@ -371,14 +393,15 @@ def tune_and_run_ils(
         verbose=bool(verbose),
     )
 
-    # Attach catcher to ILS logger (run_ils uses its own logging if passed)
+    # Attach catcher to ILS logger (run_ils uses its own logging if passed).
+    # Use a single reference start_call for both the logger-based and stdout-based
+    # best-time catchers so that time_to_best is consistent with total_elapsed.
+    start_call = time.perf_counter()
     lgr = logging.getLogger("ILS")
     lgr.setLevel(logging.INFO)
-    catcher, start = attach_best_catcher(lgr)  # logger-based catcher (kept)
+    catcher, _ = attach_best_catcher(lgr, start_time=start_call)
 
-    stdout_catcher = RealtimeStdoutBestCatcher(start, fallback_stream=sys.stdout)
-
-    start_call = time.perf_counter()
+    stdout_catcher = RealtimeStdoutBestCatcher(start_call, fallback_stream=sys.stdout)
     with contextlib.redirect_stdout(stdout_catcher):
         out = run_ils(
             coords=coords, demand=demand, Q=Q,
@@ -417,14 +440,17 @@ def tune_and_run_tabu(
 
     intra_cap = int(np.clip(1.5 * feats.med_route_len, 32, 128))
     inter_cap = int(np.clip(2.5 * feats.med_route_len, 64, 256))
-    max_no_improve = 800 if feats.n >= 800 else (600 if feats.n >= 300 else 400)
+    # For small instances we don't need extremely long no-improve windows.
+    if feats.n <= 70:
+        max_no_improve = 200
+    else:
+        max_no_improve = 800 if feats.n >= 800 else (600 if feats.n >= 300 else 400)
     k_nearest = feats.nn_k_default
 
+    start_call = time.perf_counter()
     lgr = logging.getLogger("TabuSearch")
     lgr.setLevel(logging.INFO)
-    catcher, start = attach_best_catcher(lgr)
-
-    start_call = time.perf_counter()
+    catcher, _ = attach_best_catcher(lgr, start_time=start_call)
     out = tabu_search(
         coords=coords, demand=demand, Q=Q,
         routes_init=[r[:] for r in routes_init],
@@ -462,7 +488,11 @@ def tune_and_run_tabu(
 
 
 def _choose_remove_fraction(n: int, density: float, tightness: float) -> Tuple[float, float]:
-    if n <= 200:
+    # Slightly smaller ruin sizes for very small instances to avoid over-destroying
+    # (less disruptive moves when few customers exist).
+    if n <= 70:
+        a, b = 0.06, 0.14
+    elif n <= 200:
         a, b = 0.08, 0.18
     elif n <= 700:
         a, b = 0.10, 0.22
@@ -494,11 +524,10 @@ def tune_and_run_alns(
     reaction = 0.35 if feats.n >= 300 else 0.3
     segment = 30 if feats.n >= 300 else 40
 
+    start_call = time.perf_counter()
     lgr = logging.getLogger("ALNS")
     lgr.setLevel(logging.INFO)
-    catcher, start = attach_best_catcher(lgr)
-
-    start_call = time.perf_counter()
+    catcher, _ = attach_best_catcher(lgr, start_time=start_call)
     out = alns_run(
         coords=coords, demand=demand, Q=Q,
         routes_init=[r[:] for r in routes_init],
@@ -547,11 +576,10 @@ def tune_and_run_lns(
     ls_slice = 0.8 if feats.n >= 300 else 0.5
     if time_budget_sec <= 40: ls_slice = max(0.3, ls_slice * 0.75)
 
+    start_call = time.perf_counter()
     lgr = logging.getLogger("LNS")
     lgr.setLevel(logging.INFO)
-    catcher, start = attach_best_catcher(lgr)
-
-    start_call = time.perf_counter()
+    catcher, _ = attach_best_catcher(lgr, start_time=start_call)
     out = lns_run(
         coords=coords, demand=demand, Q=Q,
         routes_init=[r[:] for r in routes_init],
@@ -681,5 +709,32 @@ def autotune_and_run_all(
             res = report[name]
             logger.info(f"  - {name.upper():5s} | cost={res['cost']:.2f} | routes={len(res['routes'])} | best@{res['time_to_best']:.2f}s")
         logger.info(f"  => BEST: {best_name.upper()} | cost={best_cost:.2f}")
+
+    # Also save a CSV summary into the instance solutions folder.
+    try:
+        sol_dir = os.path.join("solutions", inst_name)
+        _ensure_dir(sol_dir)
+        csv_path = os.path.join(sol_dir, f"{inst_name}_summary.csv")
+        with open(csv_path, 'w', newline='', encoding='utf-8') as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["algo", "cost", "route_count", "time_to_best", "cfg", "is_best"])
+            for name in ["cw", "ls", "ils", "tabu", "alns", "lns"]:
+                res = report[name]
+                cfg = res.get('cfg', {})
+                try:
+                    cfg_s = json.dumps(cfg, ensure_ascii=False)
+                except Exception:
+                    cfg_s = str(cfg)
+                writer.writerow([
+                    name,
+                    float(res.get('cost', float('nan'))),
+                    len(res.get('routes', [])),
+                    float(res.get('time_to_best', float('nan'))),
+                    cfg_s,
+                    (name == best_name),
+                ])
+    except Exception:
+        # Do not raise on CSV write errors; summary logging already done.
+        pass
 
     return report

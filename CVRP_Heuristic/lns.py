@@ -12,6 +12,7 @@ from utils import (
     build_distance_matrix,
     route_cost,
     route_load,
+    is_feasible,
 )
 
 # Optional: short intensification via your local search
@@ -277,7 +278,15 @@ def lns(
     best_routes = _copy_routes(curr_routes)
     best_cost = curr_cost
 
+    # Number of customers (excluding depot 0)
     n = coords.shape[0] - 1
+
+    # Sanity check: initial solution must be feasible and visit every customer exactly once
+    if not is_feasible(curr_routes, demand, Q, must_cover_all=True, n_customers=n):
+        raise ValueError(
+            "Initial routes_init given to LNS are infeasible or do not visit all customers exactly once."
+        )
+
     min_remove = max(1, int(remove_fraction[0] * n))
     max_remove = max(min_remove, int(remove_fraction[1] * n))
 
@@ -352,6 +361,15 @@ def lns(
             except Exception:
                 pass
 
+        # Feasibility check for candidate (capacity + full coverage)
+        if not is_feasible(cand_routes, demand, Q, must_cover_all=True, n_customers=n):
+            # Discard infeasible candidate and continue; still cool temperature if SA is used
+            if verbose and logger is not None and log_detail:
+                log(f"[LNS] it={it} infeasible candidate discarded.")
+            if use_sa:
+                T = max(end_temperature, T * cool)
+            continue
+
         cand_cost = _cost(D, cand_routes)
         delta = cand_cost - curr_cost
 
@@ -404,5 +422,9 @@ def lns(
         # Cool
         if use_sa:
             T = max(end_temperature, T * cool)
+
+    # Final sanity check on best solution
+    if not is_feasible(best_routes, demand, Q, must_cover_all=True, n_customers=n):
+        raise RuntimeError("LNS finished with an infeasible best_routes solution.")
 
     return LNSSolution(routes=best_routes, cost=best_cost)
