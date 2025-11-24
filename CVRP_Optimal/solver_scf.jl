@@ -30,7 +30,8 @@ function solve_cvrp_scf(inst::VRPInstance; K::Union{Nothing,Int}=nothing,
     set_optimizer_attribute(model, "MIPGap", mipgap)
     set_optimizer_attribute(model, "MIPFocus", 3)
     set_optimizer_attribute(model, "Cuts", 2)
-    set_optimizer_attribute(model, "Heuristics", 0.25)
+    #set_optimizer_attribute(model, "Heuristics", 0.0) # disable heuristics to get more stable results, but can lead to worse solutions in some cases
+    #set_optimizer_attribute(model, "Heuristics", 0.25) # more aggressive heuristics, but can lead to worse solutions in some cases
     set_optimizer_attribute(model, "Presolve", 2)
     set_optimizer_attribute(model, "Seed", seed)
 
