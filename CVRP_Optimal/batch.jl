@@ -1,6 +1,6 @@
 module BatchCVRP
 
-export batch_solve, write_results_csv
+export batch_solve, write_results_csv, print_results
 
 using ..VRPLIB: VRPInstance, parse_vrplib
 using ..SolverSCF: solve_cvrp_scf
@@ -22,7 +22,7 @@ function batch_solve(folder::AbstractString; time_coeff::Float64=10.0, seed::Int
         sol_path = replace(vrp_path, ".vrp" => ".sol")
         sc = isfile(sol_path) ? stated_cost_from_sol(sol_path) : nothing
 
-        push!(results, (
+        row = (
             name = name,
             n = inst.n,
             K = K,
@@ -37,9 +37,43 @@ function batch_solve(folder::AbstractString; time_coeff::Float64=10.0, seed::Int
             stated_cost = sc,
             diff = (sc === nothing || isnan(res.objective)) ? nothing : (res.objective - sc),
             diff_pct = (sc === nothing || isnan(res.objective)) ? nothing : (100 * (res.objective - sc) / sc),
-        ))
+        )
+
+        # Print immediately for this instance
+        stated = row.stated_cost === nothing ? "n/a" : string(row.stated_cost)
+        diff   = row.diff === nothing ? "n/a" : string(round(row.diff; digits=2))
+        diffpct = row.diff_pct === nothing ? "n/a" : string(round(row.diff_pct; digits=2)) * "%"
+        println("\nInstance " * row.name *
+                " | obj=" * string(row.objective) *
+                " | gap=" * string(row.mip_gap) *
+                " | time=" * string(row.runtime) * "s" *
+                " | veh=" * string(row.vehicles) *
+                " | stated=" * stated *
+                " | diff=" * diff *
+                " | diff%=" * diffpct)
+        flush(stdout)
+
+        push!(results, row)
     end
     return results
+end
+
+function print_results(rows)
+    println("\nBatch results:")
+    for r in rows
+        stated = r.stated_cost === nothing ? "n/a" : string(r.stated_cost)
+        diff   = r.diff === nothing ? "n/a" : string(round(r.diff; digits=2))
+        diffpct = r.diff_pct === nothing ? "n/a" : string(round(r.diff_pct; digits=2)) * "%"
+        println("  " * r.name *
+                " | obj=" * string(r.objective) *
+                " | gap=" * string(r.mip_gap) *
+                " | time=" * string(r.runtime) * "s" *
+                " | veh=" * string(r.vehicles) *
+                " | stated=" * stated *
+                " | diff=" * diff *
+                " | diff%=" * diffpct)
+    end
+    return nothing
 end
 
 function write_results_csv(path::AbstractString, rows)
