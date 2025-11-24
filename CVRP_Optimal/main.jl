@@ -39,7 +39,7 @@ base = @__DIR__
 #VRPUtils.pretty_print_routes(routes, inst)
 
 # 2) Batch all instances in folder "A" and write CSV
-folder = joinpath(base, "A")
+folder = joinpath(base, "Results")
 rows = BatchCVRP.batch_solve(folder; time_coeff=2.0, seed=0)
 outcsv = joinpath(folder, "batch_results_2n_0.25h.csv")
 BatchCVRP.write_results_csv(outcsv, rows)
