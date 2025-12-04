@@ -43,5 +43,3 @@ Optionally pin versions via a requirements.txt if needed.
 - Notebooks rename and normalize CSV columns (e.g., `runtime` → `time_to_best`, `objective` → `cost`) and create an `instance_name` column.
 - The analysis computes percentage gap to optimal per instance and aggregates results by algorithm.
 - Color palettes and algorithm ordering are defined inside the notebooks for plotting.
-
-Contributions, issues or corrections to expected input paths are welcome via edits to the notebooks or this README.
